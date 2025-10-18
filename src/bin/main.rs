@@ -3,10 +3,14 @@ use std::time::Instant;
 use clap::Parser;
 use p3_baby_bear::BabyBear;
 use p3_challenger::DuplexChallenger;
-use p3_field::{PrimeField64, extension::BinomialExtensionField};
+use p3_commit::ExtensionMmcs;
+use p3_field::{Field, PrimeField64, extension::BinomialExtensionField};
+use p3_fri::{FriParameters, FriProof, TwoAdicFriPcs};
 use p3_goldilocks::Goldilocks;
 use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear};
+use p3_merkle_tree::MerkleTreeMmcs;
 use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
+use p3_uni_stark::{StarkConfig, prove, verify};
 use rand::{
     Rng, SeedableRng,
     rngs::{SmallRng, StdRng},
@@ -212,4 +216,30 @@ fn main() {
     let proof_size = prover_state.proof_data().len() as f64 * (F::ORDER_U64 as f64).log2() / 8.0;
     println!("proof size: {:.2} KiB", proof_size / 1024.0);
     println!("Verification time: {} μs", verify_time.as_micros());
+
+    let whir_final_round = params.final_round_config();
+    let fri_log_final_poly_len = whir_final_round.domain_size.ilog2();
+    let fri_queries = whir_final_round.num_queries;
+    let mmcs: MerkleTreeMmcs<
+        <F as Field>::Packing,
+        <F as Field>::Packing,
+        MerkleHash,
+        MerkleCompress,
+        8,
+    > = MerkleTreeMmcs::new(params.merkle_hash.clone(), params.merkle_compress.clone());
+    let extension_mmcs: ExtensionMmcs<F, EF, _> = ExtensionMmcs::new(mmcs.clone());
+
+    let fri_params = FriParameters {
+        log_blowup: starting_rate,
+        log_final_poly_len: fri_log_final_poly_len as usize,
+        num_queries: fri_queries,
+        proof_of_work_bits: whir_final_round.pow_bits,
+        mmcs: extension_mmcs.clone(),
+    };
+
+    let fri_pcs = TwoAdicFriPcs::<F, _, _, _>::new(dft, extension_mmcs, fri_params);
+    let fri_poseidon16 = Poseidon16::new_from_rng_128(&mut rng);
+    let fri_challenger = MyChallenger::new(fri_poseidon16.clone());
+    let fri_config: StarkConfig<_, MyChallenger, _> =
+				    StarkConfig::new(fri_pcs, fri_challenger.clone());
 }
